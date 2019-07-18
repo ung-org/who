@@ -1,8 +1,11 @@
-#define _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
 #include <locale.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
+#include <utmpx.h>
 
 enum {
 	BOOT	= 1<<0,
@@ -17,6 +20,36 @@ enum {
 	TERMINAL= 1<<9,
 	IDLE	= 1<<10,
 };
+
+char * utmpx_time(const struct utmpx *u)
+{
+	static char dt[32];
+	time_t t = u->ut_tv.tv_sec;
+	struct tm *tm = localtime(&t);
+	strftime(dt, sizeof(dt), "%b %e %H:%M", tm);
+	return dt;
+}
+
+char utmpx_state(const struct utmpx *u)
+{
+	char term[FILENAME_MAX];
+	snprintf(term, sizeof(term), "/dev/%s", u->ut_line);
+	struct stat st;
+
+	if (stat(term, &st) == -1) {
+		return '?';
+	}
+
+	if ((st.st_mode & S_IFCHR) != S_IFCHR) {
+		return ' ';
+	}
+
+	if (S_IWGRP & st.st_mode) {
+		return '+';
+	}
+
+	return '-';
+}
 
 int main(int argc, char *argv[])
 {
@@ -64,7 +97,7 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'q':
-			flags |= QUICK;
+			flags = QUICK;
 			break;
 
 		case 'r':
@@ -92,10 +125,6 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (flags & QUICK) {
-		flags = QUICK;
-	}
-
 	if (flags == 0 && argc == optind + 2) {
 		if (strcmp("am", argv[optind]))
 			return 1;
@@ -104,8 +133,56 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 
-		printf("ok\n");
 		flags = SELF;
+	}
+
+	setutxent();
+	struct utmpx *u = NULL;
+	while ((u = getutxent()) != NULL) {
+		if (flags == QUICK) {
+			printf("%s\n", u->ut_user);
+			continue;
+		}
+
+		if (u->ut_type == BOOT_TIME) {
+			if (!(flags & BOOT)) {
+				continue;
+			}
+			u->ut_user[0] = '\0';
+			strcpy(u->ut_line, "system boot");
+		}
+
+		if (!strcmp(u->ut_user, "runlevel")) {
+			if (!(flags & RUNLEVEL)) {
+				continue;
+			}
+			u->ut_user[0] = '\0';
+			strcpy(u->ut_line, "run-level");
+		}
+
+		printf("%-12s\t", u->ut_user);
+
+		if (flags & TERMINAL) {
+			if (u->ut_user[0] == '\0') {
+				printf("  ");
+			} else {
+				printf("%c ", utmpx_state(u));
+			}
+		}
+
+		printf("%-8s\t", u->ut_line);
+
+		printf("%s", utmpx_time(u));
+
+		if ((flags & TERMINAL) && u->ut_user[0] != '\0') {
+			printf("\t");
+			/* activity */
+			printf("%d\t", u->ut_pid);
+			/* comment */
+			/* exit */
+		}
+
+		printf("\n");
 	}
 
 	return 0;
